@@ -1,93 +1,49 @@
-.ol-popup {
-  position: absolute;
-  background-color: white;
-  -webkit-filter: drop-shadow(0 1px 4px rgba(0,0,0,0.2));
-  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.2));
-  padding: 15px;
-  border-radius: 10px;
-  border: 1px solid #cccccc;
-  bottom: 12px;
-  left: -50px;
-  min-width: 280px;
-}
-.ol-popup:after, .ol-popup:before {
-  top: 100%;
-  border: solid transparent;
-  content: " ";
-  height: 0;
-  width: 0;
-  position: absolute;
-  pointer-events: none;
-}
-.ol-popup:after {
-  border-top-color: white;
-  border-width: 10px;
-  left: 48px;
-  margin-left: -10px;
-}
-.ol-popup:before {
-  border-top-color: #cccccc;
-  border-width: 11px;
-  left: 48px;
-  margin-left: -11px;
-}
-.ol-popup-closer {
-  text-decoration: none;
-  position: absolute;
-  top: 2px;
-  right: 8px;
-}
-.ol-popup-closer:after {
-  content: "✖";
+html, body, #app-content, #inner-app-content, #outer-container, #map {
+    margin: 0px;
+    padding: 2px;
+    height: 100%;
 }
 
-/* Dropdown Button */
-.select-style {
-    border: 1px solid #ccc;
-    width: 268px;
-    border-radius: 3px;
-    overflow: hidden;
-    background: #fafafa url("http://i62.tinypic.com/15xvbd5.png") no-repeat 90% 50%;
+#app-navigation-items {
+    height: 100% !important;
 }
 
-.select-style select {
-    padding: 5px 8px;
-    width: 100%;
-    border: none;
-    box-shadow: none;
-    background: transparent;
-    background-image: none;
-    -webkit-appearance: none;
+#inner-app-content {
+    padding: 0;
+    height: 100%;
 }
 
-.select-style select:focus {
-    outline: none;
-}
-#myTable {
+.lftable {
     font-family: "Trebuchet MS", Arial, Helvetica, sans-serif;
     border-collapse: collapse;
     width: 100%;
+    overflow-x: auto;
+    overflow-y: scroll;
+    height: 50%;
 }
 
-#myTable td, #myTable th {
+.lftable td, .lftable th {
     border: 1px solid #ddd;
     padding: 8px;
 }
-#myTable td:last-child {
-    border :none;
+
+.lftable td:last-child {
+    border: none;
     flex: 1;
     background-color: #ffffff;
 }
 
-#myTable tr:nth-child(even){background-color: #f2f2f2;}
-
-#myTable tr:last-child {
-  border :none;
-  flex: 1;
-  background-color: #ffffff;
+.lftable tr:nth-child(even) {
+    background-color: #f2f2f2;
 }
 
-#myTable th {
+.lftable tr:last-child {
+    border: none;
+    flex: 1;
+    background-color: #ffffff;
+}
+
+.lftable th {
     padding-top: 12px;
     padding-bottom: 12px;
     padding-left: 12px;

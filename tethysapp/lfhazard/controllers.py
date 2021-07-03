@@ -1,405 +1,209 @@
 from django.shortcuts import render
-from django.contrib.auth.decorators import login_required
-from tethys_sdk.gizmos import MapView, MVLayer, MVView
 from tethys_sdk.gizmos import TextInput
 from tethys_sdk.gizmos import SelectInput
 from django.http import JsonResponse
 
-from pyproj import Proj, transform
-import csv
 import json
 import os
-import math
 
-# @login_required()
+import pandas as pd
+import numpy as np
+
+from .app import Lfhazard as App
+
+
 def home(request):
     """
-    Controller for the app home page.
+    Controller for map page.
     """
-    context = {}
+    # Define Gizmo Options
+    select_model = SelectInput(
+        display_text='Model Type:',
+        name='select_model',
+        multiple=False,
+        options=(('SPT (Standard Penetration Test)', 'spt'), ('CPT (Cone Penetration Test)', 'cpt')),
+        initial=('SPT (Standard Penetration Test)', 'spt'),
+    )
+    select_year = SelectInput(
+        display_text='Model/Data Year:',
+        name='select_year',
+        multiple=False,
+        options=[(2014, 2014), (2008, 2008)],
+        initial=[(2014, 2014)]
+    )
+    select_return_period = SelectInput(
+        display_text='Return Period (years):',
+        name='select_return_period',
+        multiple=False,
+        options=[('475', 475), ('1033', 1033), ('2475', 2475)],
+        initial=['475', 475]
+    )
+    select_state = SelectInput(
+        display_text='State:',
+        name='select_state',
+        multiple=False,
+        options=[
+            ('Alaska', 'Alaska'),
+            ('Connecticut', 'Connecticut'),
+            ('Idaho', 'Idaho'),
+            ('Montana', 'Montana'),
+            ('Oregon', 'Oregon'),
+            ('South Carolina', 'South_Carolina'),
+            ('Utah', 'Utah'),
+        ],
+        initial=['Utah', 'Utah']
+    )
+
+    text_input_lat = TextInput(
+        display_text='Latitude',
+        name='lat-input'
+    )
+    text_input_lon = TextInput(
+        display_text='Longitude',
+        name='lon-input'
+    )
+
+    context = {
+        'select_model': select_model,
+        'select_year': select_year,
+        'select_return_period': select_return_period,
+        'select_state': select_state,
+        'text_input_lat': text_input_lat,
+        'text_input_lon': text_input_lon,
+    }
 
     return render(request, 'lfhazard/home.html', context)
 
 
-# @login_required()
-def map(request):
+def get_geojson(request):
+    state = str(request.GET.get('state', 'utah')).lower().replace(' ', '')
+    with open(os.path.join(App.get_app_workspace().path, 'state_geojson', f'{state}.geojson'), 'r') as gj:
+        return JsonResponse(json.loads(gj.read()))
+
+
+def interpolate_idw(a: np.array, loc: tuple, p: int = 1, r: int or float = None, nearest: int = None,
+                    bound: int = None) -> float:
     """
-    Controller for map page.
+    Copyright (c) Riley Hales, 2020. BSD 3 Clause Clear License. All rights reserved.
+
+    Computes the interpolated value at a specified location (loc) from an array of measured values (a). There are 3
+    ways to limit the interpolation points considered.
+
+    1. Use a search radius: only points within a certain radius of the location to be interpolated will be considered
+    2. Choose a number of nearest neighbors to use.
+    3. Use a number of points that bound the interpolation location. That is, take the n nearest points
+
+    All 3 may be applied but the most restrictive option will govern. For example, suppose you choose a radius of 10
+    and to use the 5 nearest neighbors. If there are 100 points within the radius of 10, 95 of them will be ignored
+    since you limited the interpolation to the nearest 5 points. Similarly, If you choose to take 5 points from each of
+    the bounding quadrants and also the nearest 5 neighbors, then 15 of the points chosen because they bound the
+    location will get ignored. This behavior could be intentional so the all 3 options can still be applied.
+
+    Args:
+        a (np.array): a numpy array with 3 columns (x, y, value) and a row for each measurement
+        loc (tuple): a tuple of (x, y) coordinates representing the location to get the interpolated values at
+        p (int): an integer representing the power factor applied to the distances before inverting (usually 1, 2, 3)
+        r (int or float): the radius, same length units as x & y values, to limit the value pairs in a. only points <=
+            r distance away are used for the interpolation
+        nearest (int): number of nearest points to include in the interpolation, if that many are available.
+        bound (int): number of nearest points to include from the 4 bounding quadrants, if that many are available.
+
+    Returns:
+        float, the IDW interpolated value for the loc specified
     """
+    # identify the x distance from location to the measurement points
+    x = np.subtract(a[:, 0], loc[0])
+    # identify the y distance from location to the measurement points
+    y = np.subtract(a[:, 1], loc[1])
+    # select the values column of the data
+    val = a[:, 2]
+    # compute the pythagorean distance (square root sum of the squares)
+    dist = np.sqrt(np.add(np.multiply(x, x), np.multiply(y, y)))
+    # filter the nearest number of points, limit by radius, and/or use bounding points (all use df sorted by distance)
+    if r is not None or nearest is not None or bound is not None:
+        b = pd.DataFrame({'dist': dist, 'val': val, 'x': x, 'y': y})
+        b.sort_values('dist', inplace=True)
+        if bound is not None:
+            b = pd.concat((b.loc[(b['x'] >= 0) & (b['y'] > 0)].head(bound),
+                           b.loc[(b['x'] >= 0) & (b['y'] < 0)].head(bound),
+                           b.loc[(b['x'] < 0) & (b['y'] > 0)].head(bound),
+                           b.loc[(b['x'] < 0) & (b['y'] < 0)].head(bound), ))
+        if nearest is not None:
+            b = b.head(nearest)
+        if r is not None:
+            b = b[b['dist'] <= r]
+        dist = b['dist'].values
+        val = b['val'].values
 
-    # Default value for name
-    state = ''
-    lat = ''
-    lon = ''
-    modelYear = ''
-    returnPeriod = ''
-    features = []
+    # raise distances to power (usually 1 or 2)
+    dist = np.power(dist, p)
+    # inverse the distances
+    dist = np.divide(1, dist)
 
-    # Define Gizmo Options
-    select_state = SelectInput(display_text='State:',
-                            name='select_state',
-                            multiple=False,
-                            options=[('Utah', 'Utah'), ('Alaska', 'Alaska'), ('Idaho', 'Idaho'), ('Montana', 'Montana'), ('South Carolina', 'South_Carolina'), ('Connecticut', 'Connecticut'),],
-                            initial=['Utah', 'Utah'])
-
-    text_input_lat = TextInput(display_text='Longitude',
-                                   name='lat-input')
-
-    text_input_lon = TextInput(display_text='Latitude',
-                                   name='lon-input')
-
-    select_modelYear = SelectInput(display_text='Model Year:',
-                            name='select_modelYear',
-                            multiple=False,
-                            options=[('2008', 2008), ('2014', 2014)],
-                            initial=['2008', 2008])
-
-    select_returnPeriod = SelectInput(display_text='Return Period:',
-                            name='select_returnPeriod',
-                            multiple=False,
-                            options=[('475', 475), ('1033', 1033), ('2475', 2475)],
-                            initial=['475', 475])
-
-    # Check form data
-    if request.POST and 'lat-input' and 'lon-input' in request.POST:
-       lat = request.POST['lat-input']
-       lon = request.POST['lon-input']
-
-
-    if request.POST and 'select_state' and 'select_modelYear' and 'select_returnPeriod' in request.POST:
-       state = request.POST['select_state']
-       modelYear = request.POST['select_modelYear']
-       returnPeriod = request.POST['select_returnPeriod']
-
-    # Pass variables to the template via the context dictionary
-    context = {'state': state,
-               'lat': lat,
-               'lon': lon,
-               'modelYear': modelYear,
-               'returnPeriod': returnPeriod,
-               'select_state': select_state,
-               'text_input_lat': text_input_lat,
-               'text_input_lon': text_input_lon,
-               'select_modelYear': select_modelYear,
-               'select_returnPeriod': select_returnPeriod}
-
-    return render(request, 'lfhazard/map.html', context)
-
-
-# @login_required
-def documentation(request):
-
-    # Create template context dictionary
-    context = {}
-
-    return render(request, 'lfhazard/documentation.html', context)
+    return float(np.divide(np.sum(np.multiply(dist, val)), np.sum(dist)))
 
 
 def query_csv(request):
-  """
-  From the lon and lat interpolates from 4 of the closests points from a csv files,
-  the LD, LS and SSD values.
-  """
-  result = {}
-  dist11 = 10000
-  dist12 = 10000
-  dist21 = 10000
-  dist22 = 10000
-  # dist will contain the 2 closests distances from the coordinate put in.
-  # LS files             
-  # Quadrant 1: dist [0,1]  
-  # Quadrant 2: dist [2,3]  
-  # Quadrant 3: dist [4,5]  
-  # Quadrant 4: dist [6,7]  
-  dist = [10000,10000,10000,10000,10000,10000,10000,10000]
-  # quad_line_tracker will contain the values of the point closest to the
-  # cooridnates put in.
-  quad_line_tracker=[0,0,0,0,0,0,0,0]
-  # temp_numerator is a temporary variable for calcuations
-  temp_numerator = 1
-  # point_value will contain the calculated variables that will be 
-  # brought to the js file.
-  point_value = []
-  try:
-    if request.method == 'POST':
-      request_dict = json.loads(request.body)
+    """
+    From the lon and lat interpolates from 4 of the closest points from a csv files,
+    the LD, LS and SSD values.
+    """
+    lon = float(request.GET['lon'])
+    lat = float(request.GET['lat'])
+    year = request.GET['year']
+    state = request.GET['state']
+    return_period = request.GET['returnPeriod']
+    model = request.GET['model']
+    csv_base_path = os.path.join(App.get_app_workspace().path, model, year)
 
-      # These are all the values from the javascript
+    point = (float(lon), float(lat))
 
-      print (request_dict)
-      lon = float(request_dict['lon'])
-      lat = float(request_dict['lat'])
-      year = request_dict['year']
-      state = request_dict['state']
-      returnPeriod = request_dict['returnPeriod']
-      
-      # this finds the correct csv files given the parameters
+    if model == 'cpt':
+        # get CSR from the BI_LT_returnperiod csvs
+        df = pd.read_csv(os.path.join(
+            csv_base_path, f'BI_LT-{return_period}', f'BI_LT_{return_period}_{state}.csv'))
+        csr = interpolate_idw(df[['Longitude', 'Latitude', 'CSR']].values, point, bound=1)
 
-      # path extentions
-      LS_path = "LS-" + returnPeriod + '_States/LS-' + returnPeriod + '_' + state + '.csv'
-      LT_path = "LT-" + returnPeriod + '_States/LT-' + returnPeriod + '_' + state + '.csv'
-      SSD_path= "SSD-" + returnPeriod + '_States/SSD-' + returnPeriod + '_' + state + '.csv'
-      path_extension = [LS_path, LT_path, SSD_path]
+        # get Qreq from the KU_LT_returnperiod csv files
+        df = pd.read_csv(os.path.join(
+            csv_base_path, f'KU_LT-{return_period}', f'KU_LT_{return_period}_{state}.csv'))
+        qreq = interpolate_idw(df[['Longitude', 'Latitude', 'Qreq']].values, point, bound=1)
 
-      # checks if path to the files is right
-      temp_path = '/home/student/tethysdev/lf_hazard/'+year+'/' # Local path
-      print (temp_path + LS_path)
-      if os.path.isfile(temp_path + LS_path) == True:
-        csv_base_path = temp_path
-        # print "local path: " + csv_base_path
-      else:
-        csv_base_path = '/lf_hazard/'+year+'/' # Server
-        # print "server path: " + csv_base_path
+        # get Ev_ku and Ev_bi from the Set-returnperiod csv files
+        df = pd.read_csv(os.path.join(
+            csv_base_path, f'Set-{return_period}', f'Set_{return_period}_{state}.csv'))
+        ku_strain_ref = interpolate_idw(df[['Longitude', 'Latitude', 'Ku Strain (%)']].values, point, bound=1)
+        bi_strain_ref = interpolate_idw(df[['Longitude', 'Latitude', 'B&I Strain (%)']].values, point, bound=1)
 
-      # This part helps with telling if you are working on the local or serverpath
-      print ("Current Path: " + os.getcwd())
-      if csv_base_path[:2] == "/h":
-        print ("Connected to Local path")
-      elif csv_base_path[:2] == "/l":
-        print ("Connected to Server path")
+        # get gamma_ku_max and gamma_bi_max from the LS_returnperiod csv files
+        df = pd.read_csv(os.path.join(
+            csv_base_path, f'LS-{return_period}', f'LS_{return_period}_{state}.csv'))
+        ku_strain_max = interpolate_idw(df[['Longitude', 'Latitude', 'Ku Strain (%)']].values, point, bound=1)
+        bi_strain_max = interpolate_idw(df[['Longitude', 'Latitude', 'B&I Strain (%)']].values, point, bound=1)
 
-      # This loops through the extensions, gets the right files and calculates.
-      for extension in path_extension:
-        csv_file_path = csv_base_path + extension
-        ext = str(extension)
-        print (csv_file_path)
-        # This checks if file exists
-        if os.path.isfile(csv_file_path) == True:
-          print ("Is a file")
-          print ("Now working on: " + csv_file_path)
-          
-          with open(csv_file_path, 'r') as row:
-            next(row) # this skips the first line
-            for line in row:
-              # print line
-              line = line.rstrip().split(',')
-              # This sets up the lat and lon read from csv file
-              temp_lon = float(line[0])
-              temp_lat = float(line[1])
-              
-              # This tests for Quadrant one
-              if temp_lon >= lon and temp_lat >= lat:
-                
-                # This calculates the distance between two points
-                temp_dist = math.sqrt(math.pow(abs(lon-temp_lon),2)+math.pow(abs(lat-temp_lat),2))
-                
-                # This tests for the distance of point and sorts. 
-                # This will store 2 points close to the coordinates.
-                if temp_dist <= dist[1]:
-                  dist[1] = temp_dist
-                  quad_line_tracker[1] = line
-                if (temp_dist <= dist[0] and temp_dist <= dist[1]):
-                  dist[1]= dist[0]
-                  dist[0] = temp_dist
-                  quad_line_tracker[1] = quad_line_tracker[0]
-                  quad_line_tracker[0] = line
+        return JsonResponse({'point_value': [float(csr), float(qreq), float(ku_strain_ref), float(bi_strain_ref),
+                                             float(ku_strain_max), float(bi_strain_max)]})
 
-              # This test for Quadrant two
-              if temp_lon <= lon and temp_lat >= lat:
-                
-                # This calculates the distance between two points
-                temp_dist = math.sqrt(math.pow(abs(lon-temp_lon),2)+math.pow(abs(lat-temp_lat),2))
-                
-                # This tests for the distance of point and sorts. 
-                # This will store 2 points close to the coordinates.
-                if temp_dist <= dist[3]:
-                  dist[3] = temp_dist
-                  quad_line_tracker[3] = line
-                if (temp_dist <= dist[2] and temp_dist <= dist[3]):
-                  dist[3]= dist[2]
-                  dist[2] = temp_dist
-                  quad_line_tracker[3] = quad_line_tracker[2]
-                  quad_line_tracker[2] = line
-
-              # This test for Quadrant three
-              if temp_lon <= lon and temp_lat <= lat:
-                
-                # This calculates the distance between two points
-                temp_dist = math.sqrt(math.pow(abs(lon-temp_lon),2)+math.pow(abs(lat-temp_lat),2))
-                
-                # This tests for the distance of point and sorts. 
-                # This will store 2 points close to the coordinates.
-                if temp_dist <= dist[5]:
-                  dist[5] = temp_dist
-                  quad_line_tracker[5] = line
-                if (temp_dist <= dist[4] and temp_dist <= dist[5]):
-                  dist[5]= dist[4]
-                  dist[4] = temp_dist
-                  quad_line_tracker[5] = quad_line_tracker[4]
-                  quad_line_tracker[4] = line
-
-                  # This test for Quadrant four
-              if temp_lon >= lon and temp_lat <= lat:
-                
-                # This calculates the distance between two points
-                temp_dist = math.sqrt(math.pow(abs(lon-temp_lon),2)+math.pow(abs(lat-temp_lat),2))
-                
-                # This tests for the distance of point and sorts. 
-                # This will store 2 points close to the coordinates.
-                if temp_dist <= dist[7]:
-                  dist[7] = temp_dist
-                  quad_line_tracker[7] = line
-                if (temp_dist <= dist[6] and temp_dist <= dist[7]):
-                  dist[7]= dist[6]
-                  dist[6] = temp_dist
-                  quad_line_tracker[7] = quad_line_tracker[6]
-                  quad_line_tracker[6] = line
-
-            
-            
-            
-            # This part calculates the values.
-            print ("***********")
-            if ext[:2] == "LS":
-              print ("Working on LS file")
-              
-              i=0
-              temp_numerator = 0
-              temp_denominator = 0
-              LS_Dm_IDW = 0
-
-              # This loop sums up all the values and the distances for the IDW 
-              # equation. 
-              for i in range(8):
-                if dist[i] == 10000:
-                  continue
-                # if((state == "Connecticut" and year == "2014") or (state == "connecticut" and year == "2014")):
-                  if((year == "2014")):
-                    temp_numerator_add = float(quad_line_tracker[i][3])/float(math.pow(dist[i],2))
-                    temp_numerator = temp_numerator + temp_numerator_add
-                    temp_denominator_add = 1/float(math.pow(dist[i],2))
-                    temp_denominator = temp_denominator + temp_denominator_add
-                    LS_Dm_IDW = temp_numerator/temp_denominator
-                else:
-                    temp_numerator_add = float(quad_line_tracker[i][2])/float(math.pow(dist[i],2))
-                    temp_numerator = temp_numerator + temp_numerator_add
-                    temp_denominator_add = 1/float(math.pow(dist[i],2))
-                    temp_denominator = temp_denominator + temp_denominator_add
-                    try:
-                        LS_Dm_IDW = math.log(temp_numerator/temp_denominator,10)
-                    except:
-                        LS_Dm_IDW = temp_numerator/temp_denominator
-                    print("LS_Dm_IDW: " + str(LS_Dm_IDW))
-              # This part appends the LS value to the point_value being sent 
-              # to the Javascript.
-              point_value.append(LS_Dm_IDW) #D value
-              # print "This is the LS Dm IDW: "+str(LS_Dm_IDW)
-
-            elif ext[:2] == "LT":
-              print ("Working on LT file")
-              # i, place and v are values to help keep track in loop.
-              i=0
-              place=0
-              v=[2,3]
-              # temp_numerator and temp_denominator are numerator and denominator
-              # of the IDW equation.
-              # LT_IDW[0]=Cetin value, LT_IDW[1]=CSR value.
-              LT_IDW = [0,0]
-
-              for j in v:
-                temp_numerator = 0
-                temp_denominator = 0
-                for i in range(8):
-                  if dist[i] == 10000:
-                    continue
-                  temp_numerator_add = float(quad_line_tracker[i][j])/float(math.pow(dist[i],2))
-                  temp_numerator = temp_numerator + temp_numerator_add
-                  temp_denominator_add = 1/float(math.pow(dist[i],2))
-                  temp_denominator = temp_denominator + temp_denominator_add
-                LT_IDW[place] = temp_numerator/temp_denominator
-                place +=1
-                
-              
-              point_value.append(LT_IDW[0]) #Cetin value
-              point_value.append(LT_IDW[1]) #CSR value
-
-            elif ext[:2] == "SS":
-              print ("Working on SSD file")
-              
-              print ("####################")
-              print ("This is the 1st Quadrant")
-              print (" This is the 1st distance: "+str(dist[0]))
-              print (" This is the 2nd distance: "+str(dist[1]))
-              print (" This is the 1st line: "+str(quad_line_tracker[0]))
-              print (" This is the 2nd line: "+str(quad_line_tracker[1]))
-              print ("This is the 2nd Quadrant")
-              print (" This is the 1st distance: "+str(dist[2]))
-              print (" This is the 2nd distance: "+str(dist[3]))
-              print (" This is the 1st line: "+str(quad_line_tracker[2]))
-              print (" This is the 2nd line: "+str(quad_line_tracker[3]))
-              print ("This is the 3rd Quadrant")
-              print (" This is the 1st distance: "+str(dist[4]))
-              print (" This is the 2nd distance: "+str(dist[5]))
-              print (" This is the 1st line: "+str(quad_line_tracker[4]))
-              print (" This is the 2nd line: "+str(quad_line_tracker[5]))
-              print ("This is the 4th Quadrant")
-              print (" This is the 1st distance: "+str(dist[6]))
-              print (" This is the 2nd distance: "+str(dist[7]))
-              print (" This is the 1st line: "+str(quad_line_tracker[6]))
-              print (" This is the 2nd line: "+str(quad_line_tracker[7]))
-               # i, place and v are values to help keep track in loop.
-              i=0
-              place=0
-              v=[2,3,4,5]
-              # temp_numerator and temp_denominator are numerator and denominator
-              # of the IDW equation.
-              # SSD_IDW[0]=Cetin percent, SSD_IDW[1]=I&Y percent, 
-              # SSD_IDW[2]=PBR&S, SSD_IDW[3]=PBR&T.
-              SSD_IDW = [0,0,0,0]
-    
-              for j in v:
-                temp_numerator = 0
-                temp_denominator = 0
-                for i in range(8):
-                  if dist[i] == 10000:
-                    continue
-                  temp_numerator_add = float(quad_line_tracker[i][j])/float(math.pow(dist[i],2))
-                  temp_numerator = temp_numerator + temp_numerator_add
-                  temp_denominator_add = 1/float(math.pow(dist[i],2))
-                  temp_denominator = temp_denominator + temp_denominator_add
-                if(temp_numerator == 0 and temp_denominator == 0):
-                    SSD_IDW[place] = 0
-                else:
-                    SSD_IDW[place] = temp_numerator/temp_denominator
-                place +=1
-              
-              point_value.append(SSD_IDW[0]) #Cetin percent
-              point_value.append(SSD_IDW[1]) #I&Y percent
-              point_value.append(SSD_IDW[2]) #R&S
-              point_value.append(SSD_IDW[3]) #B&T
-
-            # Resets the variables dist and quad_line_tracker
-            dist = [10000,10000,10000,10000,10000,10000,10000,10000]
-            quad_line_tracker=[0,0,0,0,0,0,0,0]
-            print ("The end of the Line")
+    elif model == 'spt':
+        # Javascript expects return order: logDvalue, Nvalue, CSRvalue, Cetinvalue, InYvalue, RnSvalue, BnTvalue
+        # read the LS file and get the Log Dh ref value
+        df = pd.read_csv(os.path.join(csv_base_path, f'LS-{return_period}', f'LS-{return_period}_{state}.csv'))
+        if year == '2008':
+            log_D = interpolate_idw(df[['Longitude', 'Latitude', 'D__m_']].values, point, bound=1)
         else:
-          print ("Is not a file")
-          if ext[:2] == "LS":
-            point_value.append("No Answer Yet")
-          elif ext[:2] == "LT":
-            point_value.append("No Answer Yet")
-            point_value.append("No Answer Yet")
-          elif ext[:2] == "SS":
-            point_value.append("No Answer Yet")
-            point_value.append("No Answer Yet")
-            point_value.append("No Answer Yet")
-            point_value.append("No Answer Yet")
+            log_D = interpolate_idw(df[['Longitude', 'Latitude', 'log(D)']].values, point, bound=1)
 
+        # read the LT file and get the N req value and the CSR % value
+        df = pd.read_csv(os.path.join(csv_base_path, f'LT-{return_period}', f'LT-{return_period}_{state}.csv'))
+        n_req_cetin = interpolate_idw(df[['Longitude', 'Latitude', 'PB_Nreq_Cetin']].values, point, bound=1)
+        pb_csr = interpolate_idw(df[['Longitude', 'Latitude', 'PB_CSR_']].values, point, bound=1)
 
+        # read the SSD file and get the N req value and the CSR % value
+        df = pd.read_csv(os.path.join(csv_base_path, f'SSD-{return_period}', f'SSD-{return_period}_{state}.csv'))
+        epsilon_v_cetin = interpolate_idw(df[['Longitude', 'Latitude', 'Cetin_percent']].values, point, bound=1)
+        epsilon_v_IandY = interpolate_idw(df[['Longitude', 'Latitude', 'IandY_percent']].values, point, bound=1)
+        disp_RandS = interpolate_idw(df[['Longitude', 'Latitude', 'PB_Seismic_Slope_Disp_RandS']].values, point, bound=1)
+        disp_BandT = interpolate_idw(df[['Longitude', 'Latitude', 'PB_Seismic_Slope_Disp_BandT']].values, point, bound=1)
 
-      
-      result["status"] = "success"
-      print ("These are the point_values")
-      print (point_value)
-      result["point_value"] = point_value
-    else:
-      raise Exception('not a post request!')
-  
-  except Exception as e:
-    print (e.message)
-    result["status"] = "error"  
-  finally:
-    return JsonResponse(result)
-
-  
-  
+        return JsonResponse({'point_value': [float(log_D), float(n_req_cetin), float(pb_csr), float(epsilon_v_cetin),
+                                             float(epsilon_v_IandY), float(disp_RandS), float(disp_BandT)]})
